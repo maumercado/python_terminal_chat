@@ -1,10 +1,14 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai.chat_models import ChatOpenAI
-from langchain_community.chat_message_histories import FileChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
 from dotenv import load_dotenv
 import os
 import argparse
+import json
+import sys
+import time
+import threading
 
 def get_user_input():
     return input(">> ")
@@ -16,44 +20,76 @@ def create_chat_prompt(subject):
         HumanMessage(content="{input}")
     ])
 
-def process_input(user_input, chain):
-    if user_input.lower() in ["quit", "exit", "q"]:
-        return False
+def summarize_conversation(chat, messages):
+    filtered_messages = [msg for msg in messages if not msg.content.startswith("Previous conversation summary:")]
+    summary_prompt = f"Summarize the following conversation:\n\n{filtered_messages}\n\nSummary:"
+    summary = chat.invoke(summary_prompt)
+    return summary.content
 
-    response = chain.invoke({"input": user_input})
-    print(f"AI: {response['output']}")
+def spinner(stop_event):
+    spinner = ['|', '/', '-', '\\']
+    i = 0
+    while not stop_event.is_set():
+        sys.stdout.write('\r' + spinner[i % len(spinner)])
+        sys.stdout.flush()
+        time.sleep(0.1)
+        i += 1
 
-    return True
+def run_with_spinner(func, *args, **kwargs):
+    stop_event = threading.Event()
+    spinner_thread = threading.Thread(target=spinner, args=(stop_event,))
+    spinner_thread.start()
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="AI Chat Program")
-    parser.add_argument("--subject", type=str, default="general knowledge",
-                        help="Specify the AI's area of expertise (also used as conversation ID)")
-    return parser.parse_args()
+    result = func(*args, **kwargs)
+
+    stop_event.set()
+    spinner_thread.join()
+    sys.stdout.write('\r')
+    sys.stdout.flush()
+
+    return result
+
+def load_conversation(summary_file, message_history):
+    if os.path.exists(summary_file):
+        try:
+            with open(summary_file, 'r') as f:
+                saved_data = json.load(f)
+            summary = saved_data.get('summary', '')
+            if summary:
+                message_history.add_ai_message(f"Previous conversation summary: {summary}")
+                print("\rLoaded summary of previous conversation.")
+            else:
+                print("\rNo summary found. Starting a new conversation.")
+        except json.JSONDecodeError:
+            print("\rError loading previous conversation. Starting a new one.")
+    else:
+        print("\rStarting a new conversation.")
+
+def save_conversation(summary_file, message_history, chat):
+    full_conversation = message_history.messages
+    summary = summarize_conversation(chat, full_conversation)
+    with open(summary_file, 'w') as f:
+        json.dump({
+            'messages': [msg.dict() for msg in full_conversation],
+            'summary': summary
+        }, f)
+    return summary
 
 def run_program(subject):
-    # Load environment variables from .env file
     load_dotenv()
-
-    # Get OpenAI API key from environment variable
     openai_api_key = os.getenv("OPENAI_API_KEY")
-
     if not openai_api_key:
         print("Please set the OPENAI_API_KEY in your .env file.")
         return
 
-    chat_prompt = create_chat_prompt(subject)
     chat = ChatOpenAI(openai_api_key=openai_api_key, model="gpt-3.5-turbo")
 
-    # Create a directory for chat histories if it doesn't exist
-    os.makedirs("chat_histories", exist_ok=True)
+    os.makedirs("chat_summaries", exist_ok=True)
+    message_history = ChatMessageHistory()
+    summary_file = f"chat_summaries/{subject}_summary.json"
 
-    # Use FileChatMessageHistory instead of ChatMessageHistory
-    file_history = FileChatMessageHistory(f"chat_histories/{subject}_chat_history.json")
-
-    # Check if the history is empty and add initial system message if it is
-    if not file_history.messages:
-        file_history.add_message(SystemMessage(content=f"You are a helpful AI assistant specialized in {subject}. Always consider the full conversation history when responding."))
+    print("Loading previous conversation...", end='', flush=True)
+    run_with_spinner(load_conversation, summary_file, message_history)
 
     print(f"Welcome to the AI chat program. The AI is specialized in {subject}.")
     print("Type 'quit', 'exit', or 'q' to end the program.")
@@ -63,21 +99,29 @@ def run_program(subject):
         if user_input.lower() in ["quit", "exit", "q"]:
             break
 
-        file_history.add_user_message(user_input)
-
-        messages = file_history.messages
+        message_history.add_user_message(user_input)
+        messages = message_history.messages
 
         response = chat.invoke(messages)
-
         response_content = response.content
 
-        file_history.add_ai_message(response_content)
-
+        message_history.add_ai_message(response_content)
         print(f"AI: {response_content}")
 
-    print("\nThank you for using the AI chat program. The conversation has been saved.")
+    print("\nSaving conversation...", end='', flush=True)
+    summary = run_with_spinner(save_conversation, summary_file, message_history, chat)
+
+    print("\rConversation saved successfully.")
+    print("Conversation summary:")
+    print(summary)
     print("You can continue this conversation next time you run the program with the same subject.")
     print("Goodbye!")
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="AI Chat Program")
+    parser.add_argument("--subject", type=str, default="general knowledge",
+                        help="Specify the AI's area of expertise (also used as conversation ID)")
+    return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_arguments()
