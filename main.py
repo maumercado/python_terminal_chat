@@ -1,5 +1,5 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai.chat_models import ChatOpenAI
 from langchain_community.chat_message_histories import ChatMessageHistory
 from dotenv import load_dotenv
